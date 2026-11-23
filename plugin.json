@@ -1,0 +1,13 @@
+{
+  "name": "codex-auto-review",
+  "displayName": "Codex Auto Review",
+  "version": "0.1.0",
+  "description": "Connect local OpenAI Codex Auto-Review (codex-auto-review) to Antigravity PreToolUse approval guardian and Stop auto code review hooks.",
+  "author": {
+    "name": "Gengetau",
+    "url": "https://github.com/Gengetau"
+  },
+  "homepage": "https://github.com/Gengetau/agy-codex-auto-review",
+  "repository": "https://github.com/Gengetau/agy-codex-auto-review",
+  "logo": "assets/logo.svg"
+}

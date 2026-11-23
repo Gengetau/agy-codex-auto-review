@@ -1,0 +1,32 @@
+{
+  "codexBin": "",
+  "guardian": {
+    "enabled": true,
+    "mode": "high_autonomy",
+    "model": "codex-auto-review",
+    "reasoningEffort": "low",
+    "serviceTier": "fast",
+    "timeoutMs": 28000,
+    "fastAllowReadOnlyCommands": true,
+    "fastAllowWorkspaceCodeWrites": true,
+    "cacheAllowTtlSec": 120,
+    "transcriptRecentUserTurns": 6,
+    "readOnlyMcpTools": []
+  },
+  "codeReview": {
+    "enabled": true,
+    "model": "codex-auto-review",
+    "reasoningEffort": "medium",
+    "serviceTier": "fast",
+    "timeoutMs": 55000,
+    "minBlockingSeverity": "p1",
+    "maxAutoFixRounds": 2,
+    "maxDiffChars": 48000,
+    "maxSingleFileChars": 12000,
+    "reviewDocsOnly": false
+  },
+  "auditLog": {
+    "enabled": true,
+    "maxBytes": 2097152
+  }
+}

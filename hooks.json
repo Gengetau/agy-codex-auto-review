@@ -1,0 +1,27 @@
+{
+  "codex-guardian-approval": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "run_command|write_file|write_to_file|edit_file|replace_file_content|multi_replace_file_content|delete_file|call_mcp_tool|mcp_.*|send_command_input",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./hooks/pre_tool_guardian.mjs",
+            "timeout": 35
+          }
+        ]
+      }
+    ]
+  },
+  "codex-stop-code-review": {
+    "enabled": true,
+    "Stop": [
+      {
+        "type": "command",
+        "command": "node ./hooks/stop_code_review.mjs",
+        "timeout": 65
+      }
+    ]
+  }
+}

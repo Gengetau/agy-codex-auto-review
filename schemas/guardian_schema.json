@@ -1,0 +1,21 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "risk_level", "user_authorized", "rationale"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["allow", "ask", "deny"]
+    },
+    "risk_level": {
+      "type": "string",
+      "enum": ["low", "medium", "high", "critical"]
+    },
+    "user_authorized": {
+      "type": "boolean"
+    },
+    "rationale": {
+      "type": "string"
+    }
+  }
+}
