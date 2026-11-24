@@ -24,7 +24,8 @@
     "maxAutoFixRounds": 2,
     "maxDiffChars": 48000,
     "maxSingleFileChars": 12000,
-    "reviewDocsOnly": false
+    "reviewDocsOnly": false,
+    "reviewCommittedInTurn": true
   },
   "auditLog": {
     "enabled": true,

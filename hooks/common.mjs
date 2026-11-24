@@ -49,6 +49,7 @@ const DEFAULT_CONFIG = {
     maxDiffChars: 48000,
     maxSingleFileChars: 12000,
     reviewDocsOnly: false,
+    reviewCommittedInTurn: true,
   },
   auditLog: {
     enabled: true,
@@ -296,6 +297,7 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6, maxReadBytes
     currentTurnProgress: '',
     currentTurnMutated: false,
     currentTurnTools: [],
+    lastUserCreatedAtMs: null,
   };
   if (!transcriptPath || typeof transcriptPath !== 'string' || !existsSync(transcriptPath)) {
     return result;
@@ -329,7 +331,8 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6, maxReadBytes
       if (obj.type === 'USER_INPUT' || obj.source === 'USER_EXPLICIT') {
         const txt = cleanUserMessage(typeof obj.content === 'string' ? obj.content : '');
         if (txt) {
-          userStepIndices.push({ idx, txt });
+          const parsedTs = typeof obj.created_at === 'string' ? Date.parse(obj.created_at) : NaN;
+          userStepIndices.push({ idx, txt, createdAtMs: Number.isFinite(parsedTs) ? parsedTs : null });
         }
       }
     }
@@ -339,6 +342,7 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6, maxReadBytes
 
     const lastUserEntry = userStepIndices[userStepIndices.length - 1] || null;
     const lastUserIdx = lastUserEntry ? lastUserEntry.idx : -1;
+    result.lastUserCreatedAtMs = lastUserEntry ? lastUserEntry.createdAtMs : null;
 
     // Build chronological User <-> Assistant dialogue pairs for the recent window.
     // For each user turn, include the final substantive assistant message right before it

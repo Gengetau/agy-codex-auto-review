@@ -32,11 +32,11 @@ Long autonomous coding sessions in Antigravity often force an awkward trade-off:
 - **Fail-safe degradation**: If Codex times out, fails, is missing, or outputs invalid JSON, the hook never silently allows — it falls back to `decision: "ask"` for human confirmation.
 
 ### 2. `Stop` Automatic Code Review
-- **Single-turn structured diff review (Windows-sandbox safe)**: Collects a secret-redacted uncommitted Git diff locally (`git status -uall` expands newly created directories while skipping `.env`, keys, binaries, `node_modules`, and docs-only changes) and sends it to Codex with a strict JSON Schema — avoiding Windows `CreateProcess` sandbox blocks inside `codex exec review`.
+- **Single-turn structured diff review (Windows-sandbox safe, uncommitted + in-turn commits)**: Collects a secret-redacted Git diff locally — prioritizing uncommitted changes (`git status -uall` expands newly created directories) and automatically falling back to local commits created during the current turn when the working tree is clean (`reviewCommittedInTurn: true`). Skips `.env`, keys, binaries, `node_modules`, and docs-only changes, and sends the diff to Codex with a strict JSON Schema — avoiding Windows `CreateProcess` sandbox blocks inside `codex exec review`.
 - **Automatic fix-and-verify loop**: When concrete **`P0` / `P1`** defects (configurable) are found, the hook outputs `{"decision": "continue", "reason": "..."}`. Antigravity injects those findings as a system message and automatically wakes the working model to fix them and re-run tests.
-- **Loop & noise protection**:
-  - Skips pure Q&A / non-mutating turns and non-`NO_TOOL_CALL` terminations (errors, cancellations, running background tasks);
-  - SHA-256 `diffHash` deduplication + `maxAutoFixRounds` cap (default `2`) + **Fail-open** on Stop errors so a session can never be trapped.
+- **Loop protection & full observability**:
+  - Skips pure Q&A / non-mutating turns and non-`NO_TOOL_CALL` terminations (errors, cancellations, running background tasks), logging concise skip reasons to `audit.jsonl`;
+  - SHA-256 `diffHash` + `lastReviewedCommit` deduplication + `maxAutoFixRounds` cap (default `2`) + **Fail-open** on Stop errors so a session can never be trapped.
 
 ### 3. Redacted Audit Trail & Cross-Platform Discovery
 - Every decision is logged with automatic secret redaction to `$PLUGIN_DATA/audit.jsonl` (falling back to `<plugin_root>/logs/audit.jsonl`) with automatic log rotation.
@@ -136,7 +136,8 @@ Edits to `config.json` take effect immediately on the next hook invocation (no r
     "maxAutoFixRounds": 2,
     "maxDiffChars": 48000,
     "maxSingleFileChars": 12000,
-    "reviewDocsOnly": false
+    "reviewDocsOnly": false,
+    "reviewCommittedInTurn": true
   },
   "auditLog": {
     "enabled": true,
@@ -154,6 +155,7 @@ Edits to `config.json` take effect immediately on the next hook invocation (no r
 | `codeReview.serviceTier` | Set to `""` for standard tier or `"fast"` for priority speed (note: `"fast"` uses higher quota on standard models) |
 | `codeReview.minBlockingSeverity` | Minimum finding severity that triggers auto-fix continuation: `p0` / `p1` (default) / `p2` |
 | `codeReview.maxAutoFixRounds` | Maximum auto-fix continuation rounds per turn (default `2`) |
+| `codeReview.reviewCommittedInTurn` | When the working tree is clean, fall back to reviewing local commits created during the current turn (default `true`) |
 
 ---
 

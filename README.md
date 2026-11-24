@@ -32,11 +32,11 @@
 - **Fail-Safe 安全兜底**：审查器超时、断网、登录过期或输出非法 JSON 时，**绝不静默放行**，一律降级返回 `ask` 转人工确认。
 
 ### 2. `Stop` 回合结束自动代码审查（Auto Code Review）
-- **原生避坑 Windows 沙箱限制**：不依赖容易在 Windows 下触发 Codex 内部沙箱 `CreateProcess` 拦截的交互式子命令，改为宿主侧本地快速采集脱敏未提交 Git diff（支持 `git status -uall` 展开新建子目录，自动跳过 `.env`、密钥、二进制、`node_modules` 与纯文档改动），单轮输出严格 JSON Schema 评审结论。
+- **原生避坑 Windows 沙箱限制，覆盖未提交与本回合新提交**：不依赖容易在 Windows 下触发 Codex 内部沙箱 `CreateProcess` 拦截的交互式子命令，改为宿主侧本地快速采集脱敏 Git diff——优先检查未提交改动（支持 `git status -uall` 展开新建子目录），若工作区已干净则自动兜底审查本回合内新产生的本地提交（`reviewCommittedInTurn: true`）；全程自动跳过 `.env`、密钥、二进制、`node_modules` 与纯文档改动，单轮输出严格 JSON Schema 评审结论。
 - **自动回注修复闭环**：仅当发现真实 **`P0` / `P1`**（可配置）缺陷时，向 Antigravity 返回 `{"decision": "continue", "reason": "..."}`，由宿主自动将问题列表作为系统消息注入工作模型，直接驱使其修复并重跑测试。
-- **防死循环与防误触发**：
-  - 纯问答 / 本回合未改动代码 / 非正常结束（报错、取消、后台任务未完）直接跳过；
-  - 内置 `diffHash`（SHA-256）去重与 `maxAutoFixRounds`（默认 `2` 轮）上限，异常时 **Fail-Open** 放行，永不卡死会话。
+- **防死循环与全链路可观测**：
+  - 纯问答 / 本回合未改动代码 / 非正常结束（报错、取消、后台任务未完）直接跳过并记录精简跳过原因至审计日志；
+  - 内置 `diffHash`（SHA-256）+ `lastReviewedCommit` 去重与 `maxAutoFixRounds`（默认 `2` 轮）上限，异常时 **Fail-Open** 放行，永不卡死会话。
 
 ### 3. 脱敏审计与跨平台
 - 所有决策记录自动脱敏密钥/Token 形态后写入 `$PLUGIN_DATA/audit.jsonl`（默认回退至 `<plugin_root>/logs/audit.jsonl`），带大小轮转。
@@ -136,7 +136,8 @@ agy plugin enable codex-auto-review
     "maxAutoFixRounds": 2,
     "maxDiffChars": 48000,
     "maxSingleFileChars": 12000,
-    "reviewDocsOnly": false
+    "reviewDocsOnly": false,
+    "reviewCommittedInTurn": true
   },
   "auditLog": {
     "enabled": true,
@@ -154,6 +155,7 @@ agy plugin enable codex-auto-review
 | `codeReview.serviceTier` | 留空 `""` 使用标准档；`fast` 为加速档（注意：非 `codex-auto-review` 的常规模型使用 `fast` 会额外消耗额度） |
 | `codeReview.minBlockingSeverity` | 触发自动打回修复的最低严重级别：`p0` / `p1`（默认）/ `p2` |
 | `codeReview.maxAutoFixRounds` | 同一轮次最多自动打回修复次数（默认 `2`），防止死循环 |
+| `codeReview.reviewCommittedInTurn` | 工作区干净时是否自动兜底审查本回合新产生的本地提交（默认 `true`） |
 
 > 若希望只启用其中一个钩子，既可以在 `config.json` 里将 `guardian.enabled` 或 `codeReview.enabled` 设为 `false`，也可以直接在 `hooks.json` 中单独关闭对应 hook。
 

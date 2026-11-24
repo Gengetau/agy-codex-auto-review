@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -21,6 +21,7 @@ import {
   mapGuardianDecision,
 } from '../hooks/pre_tool_guardian.mjs';
 import {
+  collectRecentCommitDiff,
   collectRepoDiff,
 } from '../hooks/stop_code_review.mjs';
 
@@ -335,8 +336,68 @@ test('Stop hook skips non-mutating turns and non-NO_TOOL_CALL terminations', () 
       { PLUGIN_DATA: dataDir }
     );
     assert.deepEqual(outCanceled, {});
+
+    const auditLines = readFileSync(join(dataDir, 'audit.jsonl'), 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .map((l) => JSON.parse(l));
+    assert.ok(auditLines.some((e) => e.hook === 'Stop' && e.decision === 'skip_non_mutating'));
+    assert.ok(auditLines.some((e) => e.hook === 'Stop' && e.decision === 'skip_termination_reason'));
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
+test('collectRecentCommitDiff picks this-turn code commits, skips old/reviewed/docs-only commits, and redacts secrets', () => {
+  const cfg = loadConfig();
+  const repo = mkdtempSync(join(tmpdir(), 'agy-commit-diff-'));
+  try {
+    const git = (args, extraEnv = {}) =>
+      spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, ...extraEnv } });
+    git(['init']);
+    git(['config', 'user.email', 't@example.com']);
+    git(['config', 'user.name', 'Test']);
+
+    const oldDate = new Date(Date.now() - 3600_000).toISOString();
+    writeFileSync(join(repo, 'app.js'), 'export const a = 1;\n', 'utf8');
+    git(['add', 'app.js']);
+    git(['commit', '-m', 'init'], { GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate });
+
+    const turnStartMs = Date.now() - 5_000;
+    assert.equal(collectRecentCommitDiff(repo, cfg, { sinceMs: turnStartMs }), null);
+
+    // Docs-only commit in this turn -> skipped when reviewDocsOnly=false
+    writeFileSync(join(repo, 'README.md'), '# hello\n', 'utf8');
+    git(['add', 'README.md']);
+    git(['commit', '-m', 'docs']);
+    assert.equal(collectRecentCommitDiff(repo, cfg, { sinceMs: turnStartMs }), null);
+
+    // Code commit with secret + .env in this turn -> picked, .env skipped, secret redacted
+    const fakeEnvSecret = ['sk', 'proj', 'envsecret12345678901234'].join('-');
+    const fakeCodeSecret = ['sk', 'proj', 'codesecret12345678901234'].join('-');
+    writeFileSync(join(repo, '.env'), `SECRET=${fakeEnvSecret}\n`, 'utf8');
+    writeFileSync(join(repo, 'app.js'), `export const a = "${fakeCodeSecret}";\n`, 'utf8');
+    git(['add', '-A']);
+    git(['commit', '-m', 'feat: update app']);
+
+    const bundle = collectRecentCommitDiff(repo, cfg, { sinceMs: turnStartMs });
+    assert.ok(bundle, 'Expected bundle for this-turn code commit');
+    assert.equal(bundle.source, 'recent_commits');
+    assert.ok(bundle.files.includes('app.js'));
+    assert.ok(!bundle.files.includes('.env'));
+    assert.doesNotMatch(bundle.diffText, /codesecret12345678901234/);
+    assert.match(bundle.diffText, /\[REDACTED_OPENAI_KEY\]/);
+
+    // Already-reviewed HEAD commit -> skipped
+    assert.equal(
+      collectRecentCommitDiff(repo, cfg, { sinceMs: turnStartMs, lastReviewedCommit: bundle.headCommit }),
+      null
+    );
+
+    // Future turn start -> old commit skipped
+    assert.equal(collectRecentCommitDiff(repo, cfg, { sinceMs: Date.now() + 10_000 }), null);
+  } finally {
     rmSync(repo, { recursive: true, force: true });
   }
 });
@@ -616,6 +677,119 @@ test(
         { PLUGIN_DATA: dataDir }
       );
       assert.deepEqual(r3, {}, `Expected fixed code to pass Stop review, got: ${JSON.stringify(r3)}`);
+    } finally {
+      rmSync(dataDir, { recursive: true, force: true });
+      rmSync(repo, { recursive: true, force: true });
+    }
+  }
+);
+
+test(
+  'E2E live Codex Stop Code Review on clean tree: reviews this-turn commit -> dedupes -> passes after fix commit',
+  { skip: !LIVE_CODEX },
+  () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'agy-e2e-stop-commit-'));
+    const repo = mkdtempSync(join(tmpdir(), 'agy-e2e-commit-repo-'));
+    try {
+      const git = (args, extraEnv = {}) =>
+        spawnSync('git', args, { cwd: repo, encoding: 'utf8', env: { ...process.env, ...extraEnv } });
+      git(['init']);
+      git(['config', 'user.email', 't@example.com']);
+      git(['config', 'user.name', 'Test']);
+
+      const oldDate = new Date(Date.now() - 3600_000).toISOString();
+      writeFileSync(
+        join(repo, 'auth.js'),
+        'export function canAccessScope(scope, role) {\n  if (scope === "public") return true;\n  return false;\n}\n',
+        'utf8'
+      );
+      git(['add', 'auth.js']);
+      git(['commit', '-m', 'init'], { GIT_AUTHOR_DATE: oldDate, GIT_COMMITTER_DATE: oldDate });
+
+      const turnStartedIso = new Date(Date.now() - 3_000).toISOString();
+      writeFileSync(
+        join(repo, 'auth.js'),
+        'export function canAccessScope(scope, role) {\n  if (scope === "private" && role !== "owner") return false;\n  if (String(scope).toLowerCase() === "private") return true;\n  return String(scope).toLowerCase() === "public";\n}\n',
+        'utf8'
+      );
+      git(['add', 'auth.js']);
+      git(['commit', '-m', 'feat: add private scope check']);
+
+      const taskText = '给 canAccessScope 加上 scope 的 trim+小写归一化鉴权并提交到本地分支：public 允许访问，private 仅允许 owner，其余未知作用域一律拒绝';
+      const txPath = join(dataDir, 'tx_commit.jsonl');
+      writeFileSync(
+        txPath,
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', created_at: turnStartedIso, content: taskText }),
+          JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', tool_calls: [{ name: 'write_file' }, { name: 'run_command' }] }),
+        ].join('\n') + '\n',
+        'utf8'
+      );
+
+      const r1 = runHookProcess(
+        HOOK_STOP,
+        {
+          conversationId: 'e2e-stop-commit',
+          workspacePaths: [repo],
+          cwd: repo,
+          transcriptPath: txPath,
+          lastUserInput: taskText,
+          terminationReason: 'NO_TOOL_CALL',
+          fullyIdle: true,
+          continuationActive: false,
+        },
+        { PLUGIN_DATA: dataDir }
+      );
+      assert.equal(r1.decision, 'continue', `Expected Stop hook to block on buggy committed diff, got: ${JSON.stringify(r1)}`);
+      assert.match(r1.reason, /Codex Auto Code Review/);
+
+      const r2 = runHookProcess(
+        HOOK_STOP,
+        {
+          conversationId: 'e2e-stop-commit',
+          workspacePaths: [repo],
+          cwd: repo,
+          transcriptPath: txPath,
+          lastUserInput: taskText,
+          terminationReason: 'NO_TOOL_CALL',
+          fullyIdle: true,
+          continuationActive: true,
+        },
+        { PLUGIN_DATA: dataDir }
+      );
+      assert.deepEqual(r2, {}, `Expected already-reviewed commit to stop looping, got: ${JSON.stringify(r2)}`);
+
+      writeFileSync(
+        join(repo, 'auth.js'),
+        'export function canAccessScope(scope, role) {\n  if (typeof scope !== "string") return false;\n  const normalizedScope = scope.trim().toLowerCase();\n  if (normalizedScope === "public") return true;\n  if (normalizedScope === "private") return role === "owner";\n  return false;\n}\n',
+        'utf8'
+      );
+      git(['add', 'auth.js']);
+      git(['commit', '-m', 'fix: normalize scope before auth check']);
+
+      const r3 = runHookProcess(
+        HOOK_STOP,
+        {
+          conversationId: 'e2e-stop-commit',
+          workspacePaths: [repo],
+          cwd: repo,
+          transcriptPath: txPath,
+          lastUserInput: taskText,
+          terminationReason: 'NO_TOOL_CALL',
+          fullyIdle: true,
+          continuationActive: true,
+        },
+        { PLUGIN_DATA: dataDir }
+      );
+      assert.deepEqual(r3, {}, `Expected clean fix commit to pass Stop review, got: ${JSON.stringify(r3)}`);
+
+      const audit = readFileSync(join(dataDir, 'audit.jsonl'), 'utf8')
+        .trim()
+        .split(/\r?\n/)
+        .map((l) => JSON.parse(l));
+      assert.ok(audit.some((e) => e.hook === 'Stop' && e.diffSource === 'recent_commits' && e.verdict === 'fix_required'));
+      assert.ok(audit.some((e) => e.hook === 'Stop' && e.decision === 'skip_no_changes'));
+      assert.ok(audit.some((e) => e.hook === 'Stop' && e.diffSource === 'recent_commits' && e.verdict === 'pass'));
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(repo, { recursive: true, force: true });
