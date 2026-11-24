@@ -11,6 +11,7 @@
     "fastAllowWorkspaceCodeWrites": true,
     "cacheAllowTtlSec": 120,
     "transcriptRecentUserTurns": 6,
+    "transcriptMaxReadBytes": 2097152,
     "readOnlyMcpTools": []
   },
   "codeReview": {

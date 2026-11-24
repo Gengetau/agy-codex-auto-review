@@ -8,9 +8,11 @@ import { fileURLToPath } from 'node:url';
 
 import {
   PLUGIN_ROOT,
+  inspectTranscript,
   redactSecrets,
   resolveCodexBinary,
   loadConfig,
+  truncateHeadTail,
 } from '../hooks/common.mjs';
 import {
   evaluateLocalFastPath,
@@ -177,12 +179,50 @@ test('redactSecrets masks keys, tokens, and private keys', () => {
   assert.doesNotMatch(clean, /my_super_secret_value_123/);
 });
 
-test('mapGuardianDecision enforces critical -> deny, ask -> force_ask, and strict mode escalation', () => {
+test('mapGuardianDecision enforces tiered ask (medium -> ask, high -> force_ask), critical -> deny, and strict mode escalation', () => {
   assert.equal(mapGuardianDecision({ decision: 'allow', risk_level: 'low', rationale: 'ok' }, 'high_autonomy').decision, 'allow');
   assert.equal(mapGuardianDecision({ decision: 'allow', risk_level: 'medium', rationale: 'ok' }, 'strict').decision, 'ask');
   assert.equal(mapGuardianDecision({ decision: 'allow', risk_level: 'critical', rationale: 'contradiction' }, 'high_autonomy').decision, 'deny');
-  assert.equal(mapGuardianDecision({ decision: 'ask', risk_level: 'high', rationale: 'confirm' }, 'high_autonomy').decision, 'force_ask');
+  // Tiered unlock: medium unlocks Always Allow (options 2/3), high locks with force_ask
+  assert.equal(mapGuardianDecision({ decision: 'ask', risk_level: 'medium', rationale: 'scope check' }, 'high_autonomy').decision, 'ask');
+  assert.equal(mapGuardianDecision({ decision: 'ask', risk_level: 'low', rationale: 'confirm' }, 'high_autonomy').decision, 'ask');
+  assert.equal(mapGuardianDecision({ decision: 'ask', risk_level: 'high', rationale: 'prod deploy' }, 'high_autonomy').decision, 'force_ask');
   assert.equal(mapGuardianDecision({ decision: 'deny', risk_level: 'high', rationale: 'blocked' }, 'high_autonomy').decision, 'deny');
+});
+
+test('inspectTranscript preserves tail of long proposals for concise user confirmations', () => {
+  const dataDir = mkdtempSync(join(tmpdir(), 'agy-tx-'));
+  try {
+    const txPath = join(dataDir, 'transcript.jsonl');
+    const filler = '背景细节说明：第一项暂缓推进，目前暂时不用动。'.repeat(70); // ~1680 chars
+    const longProposal = `### 1. 暂缓项\n${filler}\n\n### 2. 待修项 #260\n需要修改 atlas_drive.py 与 compose.yaml 的默认门禁。\n\n我现在可以直接着手把 #260 这两项修完重新交审吗？`;
+    writeFileSync(
+      txPath,
+      [
+        JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: '看下复审结果' }),
+        JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', content: longProposal }),
+        JSON.stringify({ step_index: 2, type: 'USER_INPUT', content: '嗯' }),
+        JSON.stringify({ step_index: 3, type: 'PLANNER_RESPONSE', content: '已完成根因核查，准备修改 atlas_drive.py。', tool_calls: [{ name: 'read_file' }] }),
+      ].join('\n') + '\n',
+      'utf8'
+    );
+
+    const parsed = inspectTranscript(txPath, 6);
+    assert.match(parsed.precedingAssistantProposal, /atlas_drive\.py/);
+    assert.match(parsed.precedingAssistantProposal, /修完重新交审吗/);
+    assert.ok(parsed.recentDialogue.some((d) => d.role === 'assistant' && d.isPrecedingLatestUser));
+    assert.ok(parsed.recentDialogue.some((d) => d.role === 'user' && d.isLatestUser && d.text === '嗯'));
+    assert.match(parsed.currentTurnProgress, /atlas_drive\.py/);
+
+    // Also verify truncateHeadTail preserves both head and tail on >4000 char payloads
+    const huge = 'HEAD_MARKER ' + 'x'.repeat(5000) + ' TAIL_CONFIRMATION_QUESTION';
+    const clipped = truncateHeadTail(huge, 4000, 0.35);
+    assert.ok(clipped.length <= 4000);
+    assert.match(clipped, /^HEAD_MARKER/);
+    assert.match(clipped, /TAIL_CONFIRMATION_QUESTION$/);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 test('PreToolUse hook fails safe (decision=ask) when codex binary is missing or stdin is malformed', () => {
@@ -440,6 +480,46 @@ test(
         { PLUGIN_DATA: dataDir }
       );
       assert.equal(rApproved.decision, 'allow', `Expected allow for explicitly approved global GEMINI.md write, got: ${JSON.stringify(rApproved)}`);
+
+      // 5. Long multi-section proposal (item 1 "hold off", item 2 "fix atlas_drive.py?") + concise user reply "嗯" -> allow!
+      const txShortConfirm = join(dataDir, 'tx_short_confirm.jsonl');
+      const longSection1 = '第一项（功能 A）：已通过复审，等前置依赖合并后再变更为 v6，现在暂时不用动。'.repeat(30);
+      const fullReport = `### 1. 功能 A（暂时不用动）\n${longSection1}\n\n### 2. 衣柜联动服务（退回待修）\n1. 修复 atlas_drive.py 在默认关闭时仍查盘的问题。\n2. 对齐隔离工作树 .scratch/demo-feature/shared-services/atlas_drive.py。\n\n我现在可以直接着手把第 2 项修完重新交审吗？`;
+      writeFileSync(
+        txShortConfirm,
+        [
+          JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: '看下 review 完了吗' }),
+          JSON.stringify({ step_index: 1, type: 'PLANNER_RESPONSE', content: fullReport }),
+          JSON.stringify({ step_index: 2, type: 'USER_INPUT', content: '嗯' }),
+        ].join('\n') + '\n',
+        'utf8'
+      );
+      const rShortConfirm = runHookProcess(
+        HOOK_PRE,
+        {
+          conversationId: 'e2e-pre-5',
+          cwd: wsDir,
+          workspacePaths: [wsDir],
+          transcriptPath: txShortConfirm,
+          lastUserInput: '嗯',
+          toolCall: {
+            name: 'call_mcp_tool',
+            args: {
+              ServerName: 'demo-mcp',
+              ToolName: 'apply_patch',
+              Arguments: {
+                patch: '*** Begin Patch\n*** Update File: .scratch/demo-feature/shared-services/atlas_drive.py\n@@\n-def lookup():\n+def lookup(allow_fetch=False):\n+    if not allow_fetch: return None\n*** End Patch',
+              },
+            },
+          },
+        },
+        { PLUGIN_DATA: dataDir }
+      );
+      assert.equal(
+        rShortConfirm.decision,
+        'allow',
+        `Expected allow for concise "嗯" confirming long proposal item 2, got: ${JSON.stringify(rShortConfirm)}`
+      );
     } finally {
       rmSync(dataDir, { recursive: true, force: true });
       rmSync(wsDir, { recursive: true, force: true });

@@ -35,6 +35,7 @@ const DEFAULT_CONFIG = {
     fastAllowWorkspaceCodeWrites: true,
     cacheAllowTtlSec: 120,
     transcriptRecentUserTurns: 6,
+    transcriptMaxReadBytes: 2097152,
     readOnlyMcpTools: [],
   },
   codeReview: {
@@ -112,6 +113,20 @@ export function redactSecrets(input) {
   return s;
 }
 
+/**
+ * Keeps both the beginning and the end of long messages so action checklists
+ * and final approval questions at the tail are never clipped away.
+ */
+export function truncateHeadTail(text, maxChars, headRatio = 0.4) {
+  const s = String(text || '').trim();
+  if (s.length <= maxChars) return s;
+  const marker = ' ...[middle truncated]... ';
+  const avail = Math.max(40, maxChars - marker.length);
+  const headLen = Math.max(20, Math.floor(avail * headRatio));
+  const tailLen = Math.max(20, avail - headLen);
+  return s.slice(0, headLen).trimEnd() + marker + s.slice(s.length - tailLen).trimStart();
+}
+
 export function resolveCodexBinary(config) {
   const explicit = String(process.env.CODEX_BIN || config?.codexBin || '').trim();
   if (explicit) {
@@ -129,7 +144,6 @@ export function resolveCodexBinary(config) {
   };
 
   if (process.platform === 'win32') {
-    // 1. Windows Store / MSIX Codex Desktop package
     const winAppsDir = join(process.env.ProgramFiles || 'C:\\Program Files', 'WindowsApps');
     try {
       if (existsSync(winAppsDir)) {
@@ -141,7 +155,6 @@ export function resolveCodexBinary(config) {
       }
     } catch {}
 
-    // 2. LocalAppData Codex bin versions
     const localAppData = process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local');
     const codexBinRoot = join(localAppData, 'OpenAI', 'Codex', 'bin');
     try {
@@ -154,7 +167,6 @@ export function resolveCodexBinary(config) {
       }
     } catch {}
 
-    // 3. Fallback appserver bundle
     pushIfFile(join(homedir(), '.codex', 'plugins', '.plugin-appserver', 'codex.exe'));
   } else if (process.platform === 'darwin') {
     pushIfFile('/Applications/Codex.app/Contents/Resources/codex');
@@ -173,7 +185,6 @@ export function resolveCodexBinary(config) {
     return candidates[0].path;
   }
 
-  // Fallback to PATH lookup
   const cmd = process.platform === 'win32' ? 'where' : 'which';
   const res = spawnSync(cmd, ['codex'], { encoding: 'utf8', timeout: 3000 });
   if (res.status === 0 && res.stdout) {
@@ -271,14 +282,18 @@ export function cleanUserMessage(raw) {
 }
 
 /**
- * Extracts recent user inputs, the assistant message immediately preceding the
- * latest user confirmation (so short replies like "ok"/"可以" keep context),
- * and whether the current turn invoked any mutating/exec tool.
+ * Extracts a structured recent User <-> Assistant conversation window from
+ * transcript.jsonl (reading up to 2 MB from the tail so long multi-tool turns
+ * never push out the user's authorization or the preceding assistant proposal).
+ * Uses head+tail preservation so long proposals keep their final action plan
+ * and confirmation question intact.
  */
-export function inspectTranscript(transcriptPath, maxUserTurns = 6) {
+export function inspectTranscript(transcriptPath, maxUserTurns = 6, maxReadBytes = 2097152) {
   const result = {
     recentUserTurns: [],
+    recentDialogue: [],
     precedingAssistantProposal: '',
+    currentTurnProgress: '',
     currentTurnMutated: false,
     currentTurnTools: [],
   };
@@ -287,21 +302,20 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6) {
   }
   try {
     const st = statSync(transcriptPath);
-    const maxRead = 512 * 1024;
+    const limit = Math.max(256 * 1024, Number(maxReadBytes) || 2097152);
     let raw = '';
-    if (st.size <= maxRead) {
+    if (st.size <= limit) {
       raw = readFileSync(transcriptPath, 'utf8');
     } else {
       const fullBuf = readFileSync(transcriptPath);
-      raw = fullBuf.subarray(fullBuf.length - maxRead).toString('utf8');
+      raw = fullBuf.subarray(fullBuf.length - limit).toString('utf8');
       const nl = raw.indexOf('\n');
       if (nl >= 0) raw = raw.slice(nl + 1);
     }
 
     const lines = raw.split(/\r?\n/).filter(Boolean);
-    const userTurns = [];
-    let lastUserIdx = -1;
     const parsedSteps = [];
+    const userStepIndices = [];
 
     for (let i = 0; i < lines.length; i++) {
       let obj;
@@ -310,32 +324,65 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6) {
       } catch {
         continue;
       }
+      const idx = parsedSteps.length;
       parsedSteps.push(obj);
       if (obj.type === 'USER_INPUT' || obj.source === 'USER_EXPLICIT') {
-        lastUserIdx = parsedSteps.length - 1;
         const txt = cleanUserMessage(typeof obj.content === 'string' ? obj.content : '');
-        if (txt) userTurns.push(txt.slice(0, 500));
-      }
-    }
-
-    result.recentUserTurns = userTurns.slice(-Math.max(1, maxUserTurns));
-
-    // Find the last non-empty assistant response directly before the latest USER_INPUT
-    if (lastUserIdx > 0) {
-      for (let i = lastUserIdx - 1; i >= 0; i--) {
-        const s = parsedSteps[i];
-        if (s.type === 'USER_INPUT' || s.source === 'USER_EXPLICIT') break;
-        if (s.type === 'PLANNER_RESPONSE' && typeof s.content === 'string' && s.content.trim()) {
-          result.precedingAssistantProposal = redactSecrets(s.content.replace(/\s+/g, ' ').trim()).slice(0, 800);
-          break;
+        if (txt) {
+          userStepIndices.push({ idx, txt });
         }
       }
     }
 
+    const recentUsers = userStepIndices.slice(-Math.max(1, maxUserTurns));
+    result.recentUserTurns = recentUsers.map((u) => truncateHeadTail(u.txt, 800, 0.5));
+
+    const lastUserEntry = userStepIndices[userStepIndices.length - 1] || null;
+    const lastUserIdx = lastUserEntry ? lastUserEntry.idx : -1;
+
+    // Build chronological User <-> Assistant dialogue pairs for the recent window.
+    // For each user turn, include the final substantive assistant message right before it
+    // (especially generous budget for the one right before the latest user message).
+    const dialogue = [];
+    for (let uPos = 0; uPos < recentUsers.length; uPos++) {
+      const u = recentUsers[uPos];
+      const prevBoundary = uPos > 0 ? recentUsers[uPos - 1].idx : -1;
+      const isLatestUser = uPos === recentUsers.length - 1;
+
+      let prevAsstText = '';
+      for (let i = u.idx - 1; i > prevBoundary; i--) {
+        const s = parsedSteps[i];
+        if (s.type === 'PLANNER_RESPONSE' && typeof s.content === 'string' && s.content.trim()) {
+          prevAsstText = redactSecrets(s.content.replace(/\s+/g, ' ').trim());
+          break;
+        }
+      }
+
+      if (prevAsstText) {
+        const budget = isLatestUser ? 4000 : 1000;
+        const formattedAsst = truncateHeadTail(prevAsstText, budget, isLatestUser ? 0.35 : 0.4);
+        dialogue.push({ role: 'assistant', text: formattedAsst, isPrecedingLatestUser: isLatestUser });
+        if (isLatestUser) {
+          result.precedingAssistantProposal = formattedAsst;
+        }
+      }
+
+      dialogue.push({
+        role: 'user',
+        text: truncateHeadTail(u.txt, isLatestUser ? 1200 : 600, 0.5),
+        isLatestUser,
+      });
+    }
+
+    // Also capture the most recent assistant progress summary in the current turn (after lastUserIdx)
     const mutatingRe = /^(run_command|write_file|write_to_file|edit_file|replace_file_content|multi_replace_file_content|delete_file|apply_patch|send_command_input|call_mcp_tool|mcp_.*)$/i;
     const seenTools = new Set();
+    let latestCurrentTurnText = '';
     for (let i = Math.max(0, lastUserIdx + 1); i < parsedSteps.length; i++) {
       const step = parsedSteps[i];
+      if (step.type === 'PLANNER_RESPONSE' && typeof step.content === 'string' && step.content.trim()) {
+        latestCurrentTurnText = redactSecrets(step.content.replace(/\s+/g, ' ').trim());
+      }
       const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
       for (const tc of calls) {
         const name = String(tc?.name || tc?.tool || '').trim();
@@ -346,6 +393,10 @@ export function inspectTranscript(transcriptPath, maxUserTurns = 6) {
         }
       }
     }
+    if (latestCurrentTurnText) {
+      result.currentTurnProgress = truncateHeadTail(latestCurrentTurnText, 800, 0.4);
+    }
+    result.recentDialogue = dialogue;
     result.currentTurnTools = Array.from(seenTools);
   } catch {}
   return result;

@@ -27,8 +27,8 @@ Long autonomous coding sessions in Antigravity often force an awkward trade-off:
   - Fast-allows strictly single read-only commands (`git status`, `git diff`, `ls`, etc.) and normal in-workspace source edits;
   - Rejects shell chaining/redirection/injection (`&&`, `|`, `>`, `$(...)`, `git -c`, `--output`, sensitive file reads), sibling-directory prefix collisions, and symlink escapes;
   - **Self-protection**: Any attempt to edit this guardian plugin's own files is always routed to review, preventing prompt-injection tampering.
-- **Three configurable policy modes**: `high_autonomy` (default), `standard`, and `strict`.
-- **Context-aware authorization**: Reads recent redacted user messages and the assistant proposal immediately preceding the latest user reply so short confirmations (`"ok"`, `"yes"`) are evaluated accurately without letting tool arguments forge authorization.
+- **Three configurable modes & tiered prompts**: Supports `high_autonomy` (default), `standard`, and `strict`. Uses tiered confirmation mapping: `medium` risk returns `ask` (unlocking "Always allow" options 2 & 3), `high` risk returns `force_ask` (single-use approval), and `critical` returns `deny`.
+- **Full conversation-flow authorization awareness**: Reads up to `2 MB` from the transcript tail to reconstruct recent `User ↔ Assistant` turns with **head+tail truncation (up to 4,000 chars)** on the proposal preceding the latest user reply, accurately resolving concise confirmations (`"ok"`, `"yes"`, `"嗯"`, `"继续"`, `"1"`) while keeping untrusted `toolCall.args` strictly isolated.
 - **Fail-safe degradation**: If Codex times out, fails, is missing, or outputs invalid JSON, the hook never silently allows — it falls back to `decision: "ask"` for human confirmation.
 
 ### 2. `Stop` Automatic Code Review
